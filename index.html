@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="description" content="HVZ en ESKD risicocalculator voor type 1 diabetes" />
+  <meta name="theme-color" content="#0b1829" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Risico T1D" />
+  <title>Hart &amp; Nier Risicocalculator — Type 1 Diabetes</title>
+
+  <!-- PWA manifest inline -->
+  <script>
+    const manifest = {
+      name: "Hart & Nier Risicocalculator",
+      short_name: "Risico T1D",
+      description: "HVZ en ESKD risicocalculator voor type 1 diabetes",
+      start_url: ".",
+      display: "standalone",
+      background_color: "#0b1829",
+      theme_color: "#0b1829",
+      icons: [{
+        src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230b1829'/><text y='68' x='50' text-anchor='middle' font-size='60'>🫀</text></svg>",
+        sizes: "192x192",
+        type: "image/svg+xml"
+      }]
+    };
+    const blob = new Blob([JSON.stringify(manifest)], {type: 'application/json'});
+    const manifestUrl = URL.createObjectURL(blob);
+    document.write('<link rel="manifest" href="' + manifestUrl + '">');
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet" />
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 16px; }
+    body {
+      font-family: 'DM Sans', 'Helvetica Neue', sans-serif;
+      background: linear-gradient(145deg, #0b1829 0%, #162d4a 55%, #0b2035 100%);
+      min-height: 100vh;
+      min-height: 100dvh;
+      padding: 24px 12px 60px;
+    }
+    input[type=number] { -moz-appearance: textfield; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { opacity: 0.4; }
+    input:focus, select:focus {
+      border-color: #3b82f6 !important;
+      background: #fff !important;
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.14);
+      outline: none;
+    }
+    .kaart {
+      background: rgba(255,255,255,0.97);
+      border-radius: 18px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.28);
+    }
+    button { cursor: pointer; transition: opacity 0.15s, transform 0.1s; }
+    button:active { transform: scale(0.97); }
+    #root { max-width: 820px; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React via CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    // ── MODEL PARAMETERS ─────────────────────────────────────────────────────
+
+    const CVD = {
+      alpha:         -6.046429053,
+      b_leeftijd:     0.040672727,
+      b_vrouw:       -0.234111177,
+      b_dmduur:       0.013062752,
+      b_sbp:          0.005814221,
+      b_ldl:          0.082287009,
+      b_hba1c:        0.012209026,
+      b_micro:        0.437359313,
+      b_macro:        0.738916137,
+      b_egfr_lt40:   -0.404318528,
+      b_egfr_ge40:   -0.345596046,
+      b_roken:        0.204224209,
+      b_geenBeweging: 0.229279688,
+    };
+
+    const ESKD = {
+      // Originele parameters (niet PES) — conform Steno Risk Engine
+      alpha:    5.748317,  b_leeftijd: -0.018850, b_man: 0.337922,
+      b_dmduur: 0.011857,  b_egfr: -2.097550,
+      b_micro:  0.083593,  b_macro: 0.635484,
+      b_sbp:    0.007988,  b_hba1c: 0.010978,
+      b_roken:  0.242820,  b_cvd: 0.301880,
+      sigma: -8.180170,    g_man: 1.699476,    g_dmduur: 0.010190,
+      g_egfr: -0.248760,   g_micro: 0.496541,  g_macro: 0.870400,
+      g_sbp: -0.010820,    g_hba1c: 0.009208,  g_roken: 0.632938,
+      g_cvd: 0.655959,     g_leeftijd_vrouw: 0.086434, g_leeftijd_man: 0.065228,
+    };
+
+    // ── ACR → ALBUMINURIE ─────────────────────────────────────────────────────
+    function acrNaarCat(acr, vrouw) {
+      const lo = vrouw ? 3.5 : 2.5, hi = vrouw ? 35.0 : 25.0;
+      if (acr < lo) return "normo";
+      if (acr < hi) return "micro";
+      return "macro";
+    }
+    function albLabel(acr, vrouw) {
+      const c = acrNaarCat(acr, vrouw);
+      if (c === "normo") return { tekst: "Normaal", kleur: "#2e7d32" };
+      if (c === "micro") return { tekst: "Micro-albuminurie", kleur: "#e65100" };
+      return { tekst: "Macro-albuminurie", kleur: "#b71c1c" };
+    }
+
+    // ── BEREKENINGSFUNCTIES ───────────────────────────────────────────────────
+    function berekenCVD(inv, jr) {
+      const alb = acrNaarCat(inv.acr, inv.vrouw);
+      const micro = alb === "micro" ? 1 : 0, macro = alb === "macro" ? 1 : 0;
+      const egfrT = inv.leeftijd < 40
+        ? CVD.b_egfr_lt40 * Math.log2(inv.egfr)
+        : CVD.b_egfr_ge40 * Math.log2(inv.egfr);
+      const logR = CVD.alpha
+        + CVD.b_leeftijd * inv.leeftijd + CVD.b_vrouw * (inv.vrouw ? 1 : 0)
+        + CVD.b_dmduur * inv.dmDuur + CVD.b_sbp * inv.sbp
+        + CVD.b_ldl * inv.ldl + CVD.b_hba1c * inv.hba1c
+        + CVD.b_micro * micro + CVD.b_macro * macro + egfrT
+        + CVD.b_roken * (inv.roken ? 1 : 0)
+        + CVD.b_geenBeweging * (inv.bewegen ? 0 : 1);
+      return (1 - Math.exp(-Math.exp(logR) * jr)) * 100;
+    }
+
+    function berekenESKD(inv, jr) {
+      const alb = acrNaarCat(inv.acr, inv.vrouw);
+      const micro = alb === "micro" ? 1 : 0, macro = alb === "macro" ? 1 : 0;
+      const man = inv.vrouw ? 0 : 1;
+      const lE = Math.exp(ESKD.alpha + ESKD.b_leeftijd * inv.leeftijd
+        + ESKD.b_man * man + ESKD.b_dmduur * inv.dmDuur
+        + ESKD.b_egfr * Math.log2(inv.egfr)
+        + ESKD.b_micro * micro + ESKD.b_macro * macro
+        + ESKD.b_sbp * inv.sbp + ESKD.b_hba1c * inv.hba1c
+        + ESKD.b_roken * (inv.roken ? 1 : 0)
+        + ESKD.b_cvd * (inv.eerderCVD ? 1 : 0));
+      const lD = Math.exp(ESKD.sigma + ESKD.g_man * man
+        + ESKD.g_dmduur * inv.dmDuur + ESKD.g_egfr * Math.log2(inv.egfr)
+        + ESKD.g_micro * micro + ESKD.g_macro * macro
+        + ESKD.g_sbp * inv.sbp + ESKD.g_hba1c * inv.hba1c
+        + ESKD.g_roken * (inv.roken ? 1 : 0)
+        + ESKD.g_cvd * (inv.eerderCVD ? 1 : 0)
+        + (inv.vrouw ? ESKD.g_leeftijd_vrouw : ESKD.g_leeftijd_man) * inv.leeftijd);
+      const tot = lE + lD;
+      return (lE / tot) * (1 - Math.exp(-tot * jr)) * 100;
+    }
+
+    // ── HULPFUNCTIES ──────────────────────────────────────────────────────────
+
+    // Leeftijdsafhankelijke risicocategorieën op basis van 10-jaars CVD-risico
+    function risicoKleur(pct, leeftijd) {
+      const lft = parseFloat(leeftijd) || 50;
+      let laag, matig;
+      if (lft < 50)       { laag = 2.5;  matig = 7.5; }
+      else if (lft < 70)  { laag = 5.0;  matig = 10.0; }
+      else                { laag = null;  matig = 15.0; } // geen laag boven 70
+
+      if (laag !== null && pct < laag)
+        return { bg: "#e8f5e9", text: "#2e7d32", label: "Laag" };
+      if (pct < matig)
+        return { bg: "#fff8e1", text: "#f57f17", label: "Matig" };
+      return { bg: "#fce4ec", text: "#b71c1c", label: "Hoog" };
+    }
+
+    // Targetwaarden voor CVD-risicofactoren
+    const TARGETS = {
+      hba1c:  53,    // mmol/mol
+      sbp:    130,   // mmHg
+      ldl:    2.5,   // mmol/L
+      roken:  false,
+      bewegen: true,
+    };
+
+    // Bereken welke factoren niet op target zijn en wat het effect is
+    function berekenTargetAdvies(inv, cvd10Huidig) {
+      const adviezen = [];
+
+      const check = (label, veld, targetWaarde, eenheid, beschrijving, targetInv) => {
+        const huidig = parseFloat(inv[veld]);
+        const opTarget = typeof targetWaarde === "boolean"
+          ? inv[veld] === targetWaarde
+          : huidig <= targetWaarde;
+        if (!opTarget) {
+          // Eerst alle strings naar getallen omzetten, DAN targetInv er overheen
+          const basisInv = {
+            ...inv,
+            leeftijd: parseFloat(inv.leeftijd), dmDuur: parseFloat(inv.dmDuur),
+            sbp: parseFloat(inv.sbp), ldl: parseFloat(inv.ldl),
+            hba1c: parseFloat(inv.hba1c), acr: parseFloat(inv.acr),
+            egfr: parseFloat(inv.egfr),
+          };
+          const nieuweInv = { ...basisInv, ...targetInv };
+          const cvd10Nieuw = berekenCVD(nieuweInv, 10);
+          const reductie = cvd10Huidig - cvd10Nieuw;
+          adviezen.push({ label, beschrijving,
+            huidig: !isNaN(huidig) ? `${huidig} ${eenheid}` : null,
+            target: typeof targetWaarde === "boolean" ? null : `${targetWaarde} ${eenheid}`,
+            reductie, cvd10Nieuw });
+        }
+      };
+
+      const numInv = { ...inv,
+        leeftijd: parseFloat(inv.leeftijd), dmDuur: parseFloat(inv.dmDuur),
+        sbp: parseFloat(inv.sbp), ldl: parseFloat(inv.ldl),
+        hba1c: parseFloat(inv.hba1c), acr: parseFloat(inv.acr),
+        egfr: parseFloat(inv.egfr) };
+
+      if (parseFloat(inv.hba1c) > TARGETS.hba1c)
+        check("HbA1c", "hba1c", TARGETS.hba1c, "mmol/mol",
+          `Uw bloedsuikerwaarde (HbA1c) is ${inv.hba1c} mmol/mol. Een streefwaarde van ≤53 mmol/mol is haalbaar en verlaagt uw hartrisico.`,
+          { hba1c: TARGETS.hba1c });
+
+      if (parseFloat(inv.sbp) > TARGETS.sbp)
+        check("Bloeddruk", "sbp", TARGETS.sbp, "mmHg",
+          `Uw bloeddruk is ${inv.sbp} mmHg. Bij een streefwaarde van ≤130 mmHg daalt uw risico aanzienlijk.`,
+          { sbp: TARGETS.sbp });
+
+      if (parseFloat(inv.ldl) > TARGETS.ldl)
+        check("LDL-cholesterol", "ldl", TARGETS.ldl, "mmol/L",
+          `Uw LDL-cholesterol is ${inv.ldl} mmol/L. Verlaging naar ≤2,5 mmol/L (bijv. met statines) heeft een meetbaar effect.`,
+          { ldl: TARGETS.ldl });
+
+      if (inv.roken)
+        check("Roken", "roken", false, "",
+          `U rookt. Stoppen met roken is de meest effectieve aanpassing die u zelf kunt maken.`,
+          { roken: false });
+
+      if (!inv.bewegen)
+        check("Bewegen", "bewegen", true, "",
+          `U beweegt niet regelmatig. Minimaal 30 minuten per dag matig intensief bewegen verlaagt uw hartrisico.`,
+          { bewegen: true });
+
+      return adviezen;
+    }
+
+    const n = v => parseFloat(v);
+
+    // ── COMPONENTEN ───────────────────────────────────────────────────────────
+    function Meter({ pct, label, sublabel, leeftijd }) {
+      const k = risicoKleur(pct, leeftijd);
+      const omtrek = Math.PI * 54;
+      const streep = (Math.min(Math.max(pct, 0), 100) / 100) * omtrek;
+      return (
+        <div style={{
+          display:"flex", flexDirection:"column", alignItems:"center",
+          background: k.bg, borderRadius: 16, padding: "16px 12px 12px",
+          minWidth: 110, flex: 1, border: `1.5px solid ${k.text}28`,
+        }}>
+          <svg width={120} height={66} viewBox="0 0 124 68">
+            <path d="M 7 63 A 55 55 0 0 1 117 63"
+              fill="none" stroke="#e0e0e0" strokeWidth={9} strokeLinecap="round"/>
+            <path d="M 7 63 A 55 55 0 0 1 117 63"
+              fill="none" stroke={k.text} strokeWidth={9} strokeLinecap="round"
+              strokeDasharray={`${streep} ${omtrek}`}/>
+            <text x="62" y="56" textAnchor="middle"
+              style={{fontSize:20, fontWeight:800, fill:k.text, fontFamily:"'DM Serif Display',serif"}}>
+              {pct.toFixed(1)}%
+            </text>
+          </svg>
+          <div style={{fontSize:11, fontWeight:700, color:k.text, letterSpacing:"0.07em", textTransform:"uppercase"}}>
+            {k.label}
+          </div>
+          <div style={{fontSize:12, fontWeight:600, color:"#2d3748", marginTop:3, textAlign:"center"}}>{label}</div>
+          <div style={{fontSize:11, color:"#a0aec0", marginTop:1}}>{sublabel}</div>
+        </div>
+      );
+    }
+
+    function Veld({ label, hint, fout, children }) {
+      return (
+        <div style={{marginBottom:12}}>
+          <label style={{display:"block", fontSize:11, fontWeight:700, color:"#4a5568",
+            letterSpacing:"0.07em", textTransform:"uppercase", marginBottom:5}}>
+            {label}
+            {hint && <span style={{fontWeight:400, textTransform:"none", color:"#a0aec0", marginLeft:5}}>{hint}</span>}
+          </label>
+          {children}
+          {fout && <div style={{color:"#e53935", fontSize:11, marginTop:3}}>⚠ {fout}</div>}
+        </div>
+      );
+    }
+
+    const iStijl = {
+      width:"100%", padding:"10px 11px", borderRadius:8,
+      border:"1.5px solid #dde1e7", fontSize:15, color:"#1a202c",
+      background:"#f9fafb", fontFamily:"inherit",
+    };
+
+    function Schakelaar({ waarde, onChange, opties }) {
+      return (
+        <div style={{display:"flex", borderRadius:8, overflow:"hidden", border:"1.5px solid #dde1e7"}}>
+          {opties.map(opt => (
+            <button key={opt.waarde} onClick={() => onChange(opt.waarde)} style={{
+              flex:1, padding:"10px 4px", fontSize:13, fontWeight:600,
+              border:"none", fontFamily:"inherit",
+              background: waarde === opt.waarde ? "#1a3a5c" : "#f9fafb",
+              color: waarde === opt.waarde ? "#fff" : "#4a5568",
+            }}>{opt.label}</button>
+          ))}
+        </div>
+      );
+    }
+
+    function SectieTitel({ icoon, tekst }) {
+      return (
+        <div style={{display:"flex", alignItems:"center", gap:7, margin:"18px 0 11px"}}>
+          <span style={{fontSize:15}}>{icoon}</span>
+          <span style={{fontSize:10, fontWeight:700, color:"#1a3a5c", letterSpacing:"0.12em", textTransform:"uppercase"}}>
+            {tekst}
+          </span>
+          <div style={{flex:1, height:1, background:"#e2e8f0", marginLeft:4}}/>
+        </div>
+      );
+    }
+
+    // ── HOOFDAPP ─────────────────────────────────────────────────────────────
+    const STANDAARD = {
+      leeftijd:"50", vrouw:false, dmDuur:"15",
+      sbp:"130", ldl:"2.8", hba1c:"68",
+      acr:"1.5", egfr:"90",
+      roken:false, bewegen:true, eerderCVD:false,
+    };
+
+    function App() {
+      const [inv, setInv] = useState(STANDAARD);
+      const [berekend, setBerekend] = useState(false);
+      const [res, setRes] = useState(null);
+      const [fouten, setFouten] = useState({});
+
+      const stel = sleutel => e => {
+        setInv(p => ({ ...p, [sleutel]: e.target ? e.target.value : e }));
+        setBerekend(false);
+      };
+
+      const valideer = () => {
+        const f = {};
+        const l = n(inv.leeftijd);
+        if (isNaN(l)||l<30||l>69)             f.leeftijd = "30–69 jaar vereist";
+        const d = n(inv.dmDuur);
+        if (isNaN(d)||d<0||d>70)              f.dmDuur = "0–70 jaar";
+        const s = n(inv.sbp);
+        if (isNaN(s)||s<80||s>220)            f.sbp = "80–220 mmHg";
+        const ld = n(inv.ldl);
+        if (isNaN(ld)||ld<0.5||ld>12)         f.ldl = "0,5–12 mmol/L";
+        const h = n(inv.hba1c);
+        if (isNaN(h)||h<20||h>200)            f.hba1c = "20–200 mmol/mol";
+        const a = n(inv.acr);
+        if (isNaN(a)||a<0||a>500)             f.acr = "0–500 mg/mmol";
+        const e = n(inv.egfr);
+        if (isNaN(e)||e<5||e>200)             f.egfr = "5–200 mL/min/1,73m²";
+        return f;
+      };
+
+      const invNum = () => ({
+        ...inv,
+        leeftijd: n(inv.leeftijd), dmDuur: n(inv.dmDuur),
+        sbp: n(inv.sbp), ldl: n(inv.ldl), hba1c: n(inv.hba1c),
+        acr: n(inv.acr), egfr: n(inv.egfr),
+      });
+
+      const bereken = () => {
+        const f = valideer();
+        setFouten(f);
+        if (Object.keys(f).length > 0) return;
+        const i = invNum();
+        const cvd10 = berekenCVD(i, 10);
+        setRes({
+          cvd5:   berekenCVD(i, 5),
+          cvd10,
+          cvd30:  berekenCVD(i, 30),
+          eskd5:  berekenESKD(i, 5),
+          adviezen: berekenTargetAdvies(inv, cvd10),
+        });
+        setBerekend(true);
+        // Scroll naar resultaten op mobiel
+        setTimeout(() => {
+          document.getElementById("resultaten")?.scrollIntoView({ behavior:"smooth", block:"start" });
+        }, 100);
+      };
+
+      const herstel = () => { setInv(STANDAARD); setBerekend(false); setRes(null); setFouten({}); };
+
+      const acrNum = n(inv.acr);
+      const albI = albLabel(isNaN(acrNum) ? 0 : acrNum, inv.vrouw);
+      const grid = { display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(145px, 1fr))", gap:12 };
+
+      return (
+        <div>
+          {/* Koptekst */}
+          <div style={{textAlign:"center", marginBottom:22}}>
+            <div style={{color:"#60a5fa", fontSize:10, fontWeight:700, letterSpacing:"0.2em",
+              textTransform:"uppercase", marginBottom:7}}>
+              Type 1 Diabetes · Steno Risicomodel
+            </div>
+            <h1 style={{fontFamily:"'DM Serif Display',serif", color:"#fff",
+              fontSize:"clamp(22px,5vw,36px)", fontWeight:400, lineHeight:1.15, marginBottom:8}}>
+              Hart- &amp; Nierziekte<br/>Risicocalculator
+            </h1>
+            <p style={{color:"#93b8d8", fontSize:13, maxWidth:440, margin:"0 auto", lineHeight:1.6}}>
+              Berekent 5, 10 en 30-jaars HVZ-risico en 10-jaars ESKD-risico
+              voor patiënten van 30–69 jaar met type 1 diabetes.
+            </p>
+          </div>
+
+          {/* Invoerkaart */}
+          <div className="kaart" style={{padding:"20px 18px 16px", marginBottom:16}}>
+
+            <SectieTitel icoon="👤" tekst="Patiëntprofiel"/>
+            <div style={grid}>
+              <Veld label="Leeftijd" hint="(30–69 jr)" fout={fouten.leeftijd}>
+                <input type="number" value={inv.leeftijd} min={30} max={69}
+                  onChange={stel("leeftijd")}
+                  style={{...iStijl, borderColor: fouten.leeftijd ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+              <Veld label="Geslacht">
+                <Schakelaar waarde={inv.vrouw ? "vrouw" : "man"}
+                  onChange={v => { setInv(p=>({...p, vrouw: v==="vrouw"})); setBerekend(false); }}
+                  opties={[{waarde:"man",label:"Man"},{waarde:"vrouw",label:"Vrouw"}]}/>
+              </Veld>
+              <Veld label="DM-duur" hint="(jaren)" fout={fouten.dmDuur}>
+                <input type="number" value={inv.dmDuur} min={0} max={70}
+                  onChange={stel("dmDuur")}
+                  style={{...iStijl, borderColor: fouten.dmDuur ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+            </div>
+
+            <SectieTitel icoon="🔬" tekst="Klinische metingen"/>
+            <div style={grid}>
+              <Veld label="Systolische BD" hint="(mmHg)" fout={fouten.sbp}>
+                <input type="number" value={inv.sbp} onChange={stel("sbp")}
+                  style={{...iStijl, borderColor: fouten.sbp ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+              <Veld label="LDL-cholesterol" hint="(mmol/L)" fout={fouten.ldl}>
+                <input type="number" value={inv.ldl} step={0.1} onChange={stel("ldl")}
+                  style={{...iStijl, borderColor: fouten.ldl ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+              <Veld label="HbA1c" hint="(mmol/mol)" fout={fouten.hba1c}>
+                <input type="number" value={inv.hba1c} onChange={stel("hba1c")}
+                  style={{...iStijl, borderColor: fouten.hba1c ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+              <Veld label="eGFR" hint="(mL/min/1,73m²)" fout={fouten.egfr}>
+                <input type="number" value={inv.egfr} onChange={stel("egfr")}
+                  style={{...iStijl, borderColor: fouten.egfr ? "#e53935" : "#dde1e7"}}/>
+              </Veld>
+              <Veld label="ACR" hint="(mg/mmol)" fout={fouten.acr}>
+                <input type="number" value={inv.acr} step={0.1} min={0} onChange={stel("acr")}
+                  style={{...iStijl, borderColor: fouten.acr ? "#e53935" : "#dde1e7"}}/>
+                {!fouten.acr && inv.acr !== "" && (
+                  <div style={{fontSize:11, marginTop:4, fontWeight:600, color: albI.kleur}}>
+                    → {albI.tekst}
+                  </div>
+                )}
+              </Veld>
+            </div>
+
+            <SectieTitel icoon="⚠️" tekst="Risicofactoren"/>
+            <div style={grid}>
+              <Veld label="Roken">
+                <Schakelaar waarde={inv.roken ? "ja" : "nee"}
+                  onChange={v => { setInv(p=>({...p, roken: v==="ja"})); setBerekend(false); }}
+                  opties={[{waarde:"nee",label:"Nee"},{waarde:"ja",label:"Ja"}]}/>
+              </Veld>
+              <Veld label="Regelmatig bewegen" hint="(≥30 min/dag)">
+                <Schakelaar waarde={inv.bewegen ? "ja" : "nee"}
+                  onChange={v => { setInv(p=>({...p, bewegen: v==="ja"})); setBerekend(false); }}
+                  opties={[{waarde:"ja",label:"Ja"},{waarde:"nee",label:"Nee"}]}/>
+              </Veld>
+              <Veld label="Eerder HVZ">
+                <Schakelaar waarde={inv.eerderCVD ? "ja" : "nee"}
+                  onChange={v => { setInv(p=>({...p, eerderCVD: v==="ja"})); setBerekend(false); }}
+                  opties={[{waarde:"nee",label:"Nee"},{waarde:"ja",label:"Ja"}]}/>
+              </Veld>
+            </div>
+
+            <div style={{display:"flex", gap:10, marginTop:18}}>
+              <button onClick={bereken} style={{
+                flex:1, padding:"14px 0", borderRadius:10, border:"none",
+                background:"linear-gradient(135deg,#1a3a5c,#2563a8)",
+                color:"#fff", fontSize:16, fontWeight:700, fontFamily:"inherit",
+                boxShadow:"0 4px 18px rgba(37,99,168,0.38)",
+              }}>
+                Bereken risico
+              </button>
+              <button onClick={herstel} style={{
+                padding:"14px 18px", borderRadius:10,
+                border:"1.5px solid #dde1e7", background:"#f9fafb",
+                color:"#4a5568", fontSize:14, fontWeight:600, fontFamily:"inherit",
+              }}>
+                Wissen
+              </button>
+            </div>
+          </div>
+
+          {/* Resultaten */}
+          {berekend && res && (
+            <div id="resultaten">
+
+              {/* HVZ */}
+              <div className="kaart" style={{padding:"20px 18px", marginBottom:14}}>
+                <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:14}}>
+                  <div style={{width:38, height:38, borderRadius:"50%",
+                    background:"linear-gradient(135deg,#b91c1c,#ef4444)",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:19, flexShrink:0}}>❤️</div>
+                  <div>
+                    <div style={{fontFamily:"'DM Serif Display',serif", fontSize:18, color:"#111"}}>
+                      Hart- en vaatziekten (HVZ)
+                    </div>
+                    <div style={{fontSize:11, color:"#94a3b8", marginTop:1}}>
+                      Ischemische hartziekte · Beroerte · Hartfalen · PAV
+                    </div>
+                  </div>
+                </div>
+                <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                  <Meter pct={res.cvd5}  label="5-jaarsrisico"  sublabel="HVZ" leeftijd={inv.leeftijd}/>
+                  <Meter pct={res.cvd10} label="10-jaarsrisico" sublabel="HVZ" leeftijd={inv.leeftijd}/>
+                  <Meter pct={res.cvd30} label="30-jaarsrisico" sublabel="HVZ" leeftijd={inv.leeftijd}/>
+                </div>
+              </div>
+
+              {/* ESKD */}
+              <div className="kaart" style={{padding:"20px 18px", marginBottom:14}}>
+                <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:14}}>
+                  <div style={{width:38, height:38, borderRadius:"50%",
+                    background:"linear-gradient(135deg,#1d4ed8,#3b82f6)",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:19, flexShrink:0}}>🫘</div>
+                  <div>
+                    <div style={{fontFamily:"'DM Serif Display',serif", fontSize:18, color:"#111"}}>
+                      Eindstadium nierziekte (ESKD)
+                    </div>
+                    <div style={{fontSize:11, color:"#94a3b8", marginTop:1}}>
+                      Concurrerende risico's model
+                    </div>
+                  </div>
+                </div>
+                <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"stretch"}}>
+                  <Meter pct={res.eskd5} label="5-jaarsrisico" sublabel="ESKD" leeftijd={inv.leeftijd}/>
+                  <div style={{flex:2, minWidth:180, background:"#f0f5ff", borderRadius:12,
+                    padding:"12px 14px", border:"1px solid #c7d7f8",
+                    fontSize:12, color:"#334155", lineHeight:1.7}}>
+                    <div style={{fontWeight:700, color:"#1e3a6e", marginBottom:4}}>Methodologie</div>
+                    Houdt rekening met concurrerend risico op overlijden zonder ESKD.
+                    <div style={{fontSize:11, color:"#475569", borderTop:"1px solid #dbeafe",
+                      paddingTop:6, marginTop:6}}>
+                      ACR {inv.acr} mg/mmol →{" "}
+                      <strong style={{color: albI.kleur}}>{albI.tekst}</strong>
+                      <span style={{color:"#94a3b8", marginLeft:4}}>
+                        (grens: {inv.vrouw ? "3,5 / 35" : "2,5 / 25"} mg/mmol)
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Behandeladviezen */}
+              {res.adviezen && res.adviezen.length > 0 && (
+                <div className="kaart" style={{padding:"20px 18px", marginBottom:14}}>
+                  <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:14}}>
+                    <div style={{width:38, height:38, borderRadius:"50%",
+                      background:"linear-gradient(135deg,#065f46,#059669)",
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                      fontSize:19, flexShrink:0}}>🎯</div>
+                    <div>
+                      <div style={{fontFamily:"'DM Serif Display',serif", fontSize:18, color:"#111"}}>
+                        Wat kunt u verbeteren?
+                      </div>
+                      <div style={{fontSize:11, color:"#94a3b8", marginTop:1}}>
+                        Effect van behandeling op uw 10-jaars hartrisico (nu: {res.cvd10.toFixed(1)}%)
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex", flexDirection:"column", gap:10}}>
+                    {res.adviezen
+                      .slice()
+                      .sort((a,b) => b.reductie - a.reductie)
+                      .map((adv, i) => {
+                        const kleurBalk = adv.reductie >= 3 ? "#059669" : adv.reductie >= 1 ? "#f59e0b" : "#6366f1";
+                        const breedte = Math.min(100, Math.round((adv.reductie / res.cvd10) * 100));
+                        return (
+                          <div key={i} style={{
+                            background:"#f8fafb", borderRadius:12,
+                            padding:"12px 14px",
+                            border:"1px solid #e2e8f0",
+                          }}>
+                            <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6}}>
+                              <div style={{fontWeight:700, fontSize:13, color:"#1a202c"}}>
+                                {adv.label}
+                                {adv.huidig && adv.target && (
+                                  <span style={{fontWeight:400, color:"#94a3b8", marginLeft:6, fontSize:12}}>
+                                    {adv.huidig} → {adv.target}
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{
+                                fontWeight:800, fontSize:14, color: kleurBalk,
+                                whiteSpace:"nowrap", marginLeft:10,
+                              }}>
+                                −{adv.reductie.toFixed(1)}%
+                              </div>
+                            </div>
+                            <div style={{fontSize:12, color:"#475569", lineHeight:1.55, marginBottom:8}}>
+                              {adv.beschrijving}
+                            </div>
+                            {/* Voortgangsbalk */}
+                            <div style={{background:"#e2e8f0", borderRadius:99, height:6, overflow:"hidden"}}>
+                              <div style={{
+                                width:`${breedte}%`, height:"100%",
+                                background: kleurBalk,
+                                borderRadius:99,
+                                transition:"width 0.8s ease",
+                              }}/>
+                            </div>
+                            <div style={{fontSize:10, color:"#94a3b8", marginTop:4}}>
+                              Nieuw 10-jaarsrisico bij target: <strong style={{color:"#334155"}}>{adv.cvd10Nieuw.toFixed(1)}%</strong>
+                            </div>
+                          </div>
+                        );
+                    })}
+                  </div>
+                  {/* Gecombineerd effect */}
+                  {(() => {
+                    const gecombInv = {
+                      leeftijd: n(inv.leeftijd), dmDuur: n(inv.dmDuur),
+                      sbp: Math.min(n(inv.sbp), TARGETS.sbp),
+                      ldl: Math.min(n(inv.ldl), TARGETS.ldl),
+                      hba1c: Math.min(n(inv.hba1c), TARGETS.hba1c),
+                      acr: n(inv.acr), egfr: n(inv.egfr),
+                      vrouw: inv.vrouw, roken: false, bewegen: true, eerderCVD: inv.eerderCVD,
+                    };
+                    const gecombRisico = berekenCVD(gecombInv, 10);
+                    const totaalReductie = res.cvd10 - gecombRisico;
+                    if (totaalReductie < 0.5) return null;
+                    return (
+                      <div style={{marginTop:12, padding:"12px 14px",
+                        background:"linear-gradient(135deg,#ecfdf5,#d1fae5)",
+                        borderRadius:12, border:"1px solid #6ee7b7"}}>
+                        <div style={{fontWeight:700, fontSize:13, color:"#065f46", marginBottom:3}}>
+                          💡 Als u álle factoren naar target brengt
+                        </div>
+                        <div style={{fontSize:12, color:"#047857", lineHeight:1.55}}>
+                          Uw 10-jaars hartrisico daalt van{" "}
+                          <strong>{res.cvd10.toFixed(1)}%</strong> naar{" "}
+                          <strong>{gecombRisico.toFixed(1)}%</strong> — een verlaging van{" "}
+                          <strong>{totaalReductie.toFixed(1)} procentpunt</strong>.
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {res.adviezen && res.adviezen.length === 0 && (
+                <div className="kaart" style={{padding:"16px 18px", marginBottom:14,
+                  background:"linear-gradient(135deg,#ecfdf5,#d1fae5) !important"}}>
+                  <div style={{display:"flex", alignItems:"center", gap:10}}>
+                    <span style={{fontSize:22}}>✅</span>
+                    <div style={{fontSize:14, color:"#065f46", fontWeight:600}}>
+                      Alle risicofactoren zijn op target. Goed bezig!
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Legenda */}
+              <div className="kaart" style={{padding:"12px 18px", marginBottom:14}}>
+                <div style={{marginBottom:6}}>
+                  <span style={{fontSize:10, fontWeight:700, color:"#94a3b8",
+                    textTransform:"uppercase", letterSpacing:"0.1em"}}>
+                    Risicocategorieën (10-jaars HVZ, leeftijdsafhankelijk):
+                  </span>
+                </div>
+                <div style={{display:"flex", flexDirection:"column", gap:4, fontSize:12, color:"#475569"}}>
+                  <div><strong style={{color:"#1a202c"}}>Jonger dan 50 jaar:</strong> Laag &lt;2,5% · Matig 2,5–7,5% · Hoog ≥7,5%</div>
+                  <div><strong style={{color:"#1a202c"}}>50–69 jaar:</strong> Laag &lt;5% · Matig 5–10% · Hoog ≥10%</div>
+                  <div><strong style={{color:"#1a202c"}}>70 jaar en ouder:</strong> Matig &lt;15% · Hoog ≥15%</div>
+                </div>
+                <div style={{display:"flex", gap:12, marginTop:8, flexWrap:"wrap"}}>
+                  {[
+                    {label:"Laag",  bg:"#e8f5e9", text:"#2e7d32"},
+                    {label:"Matig", bg:"#fff8e1", text:"#f57f17"},
+                    {label:"Hoog",  bg:"#fce4ec", text:"#b71c1c"},
+                  ].map(c => (
+                    <div key={c.label} style={{display:"flex", alignItems:"center", gap:5}}>
+                      <div style={{width:11, height:11, borderRadius:3,
+                        background:c.bg, border:`1.5px solid ${c.text}`}}/>
+                      <span style={{fontSize:12}}><strong>{c.label}</strong></span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <p style={{color:"#5a7a96", fontSize:11, textAlign:"center", lineHeight:1.6, padding:"0 6px"}}>
+                Gebaseerd op de Steno Diabetes Center Copenhagen voorspellingsmodellen voor
+                type 1 diabetes (leeftijd 30–69 jaar). Uitsluitend bedoeld als klinische
+                beslissingsondersteuning — geen vervanging voor klinisch oordeel.
+              </p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+
+  <!-- Service Worker voor offline gebruik -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      const swCode = `
+        const CACHE = 'risico-calc-v1';
+        const URLS = [self.location.href];
+        self.addEventListener('install', e => {
+          e.waitUntil(caches.open(CACHE).then(c => c.addAll(URLS)));
+        });
+        self.addEventListener('fetch', e => {
+          e.respondWith(
+            caches.match(e.request).then(r => r || fetch(e.request).catch(() => caches.match(e.request)))
+          );
+        });
+      `;
+      const blob = new Blob([swCode], {type: 'application/javascript'});
+      navigator.serviceWorker.register(URL.createObjectURL(blob));
+    }
+  </script>
+</body>
+</html>
